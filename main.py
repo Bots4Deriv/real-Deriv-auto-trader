@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# Allow all browser requests
+# CORS for browser access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,6 +38,7 @@ stake_amount = 0.35
 take_profit = 1.0
 stop_loss = 10.0
 martingale_factor = 2.1
+cumulative_profit = 0.0
 
 # -----------------------
 # INDICATORS
@@ -60,10 +61,7 @@ def analyze_signal():
     momentum = calc_momentum()
     volatility = calc_volatility()
     if abs(volatility) >= 0.4:
-        if momentum > 0:
-            signal = "BUY"
-        elif momentum < 0:
-            signal = "SELL"
+        signal = "BUY" if momentum > 0 else "SELL"
     else:
         signal = "NEUTRAL"
 
@@ -87,12 +85,11 @@ async def tick_stream():
                 analyze_signal()
 
 # -----------------------
-# DERIV TRADE FUNCTION
+# DERIV TRADE FUNCTIONS
 # -----------------------
-def place_trade(direction, stake, token):
-    """Place a real Deriv contract using API token"""
-    url = "https://api.deriv.com/buy"
-    # Real API request payload
+def place_real_trade(direction, stake, token):
+    """Place a real Deriv contract"""
+    url = "https://api.deriv.com/buy"  # placeholder
     payload = {
         "price": stake,
         "symbol": SYMBOL,
@@ -101,26 +98,37 @@ def place_trade(direction, stake, token):
         "duration_unit": "t",
         "basis": "stake"
     }
-    headers = {
-        "Authorization": f"Bearer {token}"
-    }
+    headers = {"Authorization": f"Bearer {token}"}
     try:
-        # Simulate POST request (replace with actual endpoint)
+        # Uncomment below when real Deriv API endpoint is used
         # response = requests.post(url, json=payload, headers=headers)
         # data = response.json()
-        # For now, simulate response
+        # For now, simulate a contract
         data = {"contract_id": int(time.time()), "status": "ok"}
         return data
     except Exception as e:
         return {"error": str(e)}
 
+def poll_contract(contract_id, token):
+    """Poll contract result (placeholder)"""
+    # In real implementation, use:
+    # GET /proposal_open_contract?contract_id=...
+    # return result WIN/LOSS
+    # Here, simulate random outcome
+    import random
+    return "WIN" if random.random() > 0.5 else "LOSS"
+
 # -----------------------
-# AUTO TRADER LOGIC
+# AUTO TRADER
 # -----------------------
 async def auto_trader():
-    global auto_trader_running, trade_history, stake_amount, api_token
+    global auto_trader_running, trade_history, stake_amount, api_token, cumulative_profit
     martingale_stake = stake_amount
     while auto_trader_running:
+        # Stop if TP or SL reached
+        if cumulative_profit >= take_profit or cumulative_profit <= -stop_loss:
+            auto_trader_running = False
+            break
         if signal in ["BUY", "SELL"]:
             direction = signal
             trade = {
@@ -133,18 +141,26 @@ async def auto_trader():
             trade_history.append(trade)
             if len(trade_history) > 20:
                 trade_history.pop(0)
+
             # Place real trade
-            result = place_trade(direction, martingale_stake, api_token)
-            # Simulate outcome (later replace with contract update polling)
-            await asyncio.sleep(3)
-            trade["result"] = "WIN" if direction == signal else "LOSS"
-            if trade["result"] == "LOSS":
+            contract = place_real_trade(direction, martingale_stake, api_token)
+            contract_id = contract.get("contract_id", None)
+            await asyncio.sleep(3)  # wait 3 ticks
+            trade_result = poll_contract(contract_id, api_token)
+            trade["result"] = trade_result
+
+            # Update cumulative profit
+            if trade_result == "WIN":
+                cumulative_profit += martingale_stake
+                martingale_stake = stake_amount
+            else:
+                cumulative_profit -= martingale_stake
                 martingale_stake *= martingale_factor
-                # Wait for opposite breakout
+
+            # Wait for opposite breakout after loss
+            if trade_result == "LOSS":
                 while signal == direction:
                     await asyncio.sleep(0.5)
-            else:
-                martingale_stake = stake_amount
         else:
             await asyncio.sleep(0.5)
 
@@ -196,6 +212,7 @@ async def home():
         {trade_rows}
     </table>
 
+    <p>Cumulative Profit: {round(cumulative_profit,2)}</p>
     <script>setTimeout(()=>location.reload(),1000)</script>
     </body>
     </html>
@@ -206,11 +223,12 @@ async def home():
 # -----------------------
 @app.post("/start")
 async def start_auto(token: str = Form(...), stake: float = Form(...), tp: float = Form(...), sl: float = Form(...)):
-    global auto_trader_running, api_token, stake_amount, take_profit, stop_loss
+    global auto_trader_running, api_token, stake_amount, take_profit, stop_loss, cumulative_profit
     api_token = token
     stake_amount = stake
     take_profit = tp
     stop_loss = sl
+    cumulative_profit = 0.0
     if not auto_trader_running:
         auto_trader_running = True
         asyncio.create_task(auto_trader())

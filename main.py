@@ -120,7 +120,7 @@ async def tick_stream():
                 analyze_signal()
 
 #-----------------------
-# TRADE EXECUTION (60 seconds)
+# TRADE EXECUTION (15 seconds)
 #-----------------------
 
 async def execute_trade(direction, stake, token):
@@ -143,7 +143,7 @@ async def execute_trade(direction, stake, token):
             "basis": "stake",
             "contract_type": contract_type,
             "currency": "USD",
-            "duration": 60,          # Changed to 60 seconds
+            "duration": 15,          # Changed to 60 seconds
             "duration_unit": "s",    # Changed from "t" (ticks) to "s" (seconds)
             "symbol": SYMBOL
         }

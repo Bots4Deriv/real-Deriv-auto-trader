@@ -40,11 +40,11 @@ martingale_factor = 2.1
 cumulative_profit = 0
 MAX_STAKE = 30
 
------------------------
+#-----------------------
 
 INDICATORS
 
------------------------
+#-----------------------
 
 def calc_momentum():
 if len(ticks) < 10:
@@ -99,11 +99,11 @@ elif momentum < 0 and trend == "DOWN":
 else:
     signal = "NEUTRAL"
 
------------------------
+#-----------------------
 
 TICK STREAM
 
------------------------
+#-----------------------
 
 async def tick_stream():
 
@@ -134,11 +134,11 @@ async with websockets.connect(url) as ws:
 
             analyze_signal()
 
------------------------
+#-----------------------
 
 TRADE EXECUTION
 
------------------------
+#-----------------------
 
 async def execute_trade(direction, stake, token):
 
@@ -208,11 +208,11 @@ async with websockets.connect(url) as ws:
 
         await asyncio.sleep(1)
 
------------------------
+#-----------------------
 
 AUTO TRADER
 
------------------------
+#-----------------------
 
 async def auto_trader():
 
@@ -292,11 +292,11 @@ while auto_trader_running:
 
     await asyncio.sleep(5)
 
------------------------
+#-----------------------
 
 STATUS
 
------------------------
+#-----------------------
 
 @app.get("/status")
 async def status():
@@ -308,11 +308,11 @@ return {
     "cumulative_profit": cumulative_profit
 }
 
------------------------
+#-----------------------
 
 UI
 
------------------------
+#-----------------------
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
@@ -413,11 +413,11 @@ document.getElementById("profit").innerText = d.cumulative_profit.toFixed(2)
 setInterval(update,2000)
 
 </script></body></html>
-"""-----------------------
+#"""-----------------------
 
 START
 
------------------------
+#-----------------------
 
 @app.post("/start")
 async def start(demo: str = Form(...), real: str = Form(...), stake: float = Form(...)):
@@ -440,11 +440,11 @@ if not auto_trader_running:
 
 return {"status":"started"}
 
------------------------
+#-----------------------
 
 STOP
 
------------------------
+#-----------------------
 
 @app.post("/stop")
 async def stop():
@@ -455,11 +455,11 @@ auto_trader_running = False
 
 return {"status":"stopped"}
 
------------------------
+#-----------------------
 
 STARTUP
 
------------------------
+#-----------------------
 
 @app.on_event("startup")
 async def startup():

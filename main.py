@@ -411,7 +411,7 @@ setInterval(update,2000)
 #-----------------------
 
 @app.post("/start")
-async def start(token: str = Form(...), stake: float = Form(...), max_trades: int = Form(0)):
+async def start(token: str = Form(...), stake: float = Form(...), max_trades_limit: int = Form(0)):
     global auto_trader_running
     global api_token
     global stake_amount
@@ -422,7 +422,7 @@ async def start(token: str = Form(...), stake: float = Form(...), max_trades: in
 
     api_token = token
     stake_amount = round(stake, 2)
-    max_trades = max(0, max_trades)  # Ensure non-negative
+    max_trades = max(0, max_trades_limit)  # Use different name to avoid conflict
     
     # Reset stats only if starting fresh (not resuming)
     if not auto_trader_running:

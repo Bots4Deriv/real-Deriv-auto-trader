@@ -25,20 +25,16 @@ price = 0
 signal = "NEUTRAL"
 
 auto_trader_running = False
+trade_in_progress = False  # Lock to prevent multiple trades
 
-demo_token = ""
-real_token = ""
-
-demo_losses = 0
-use_real_trade = False
+api_token = ""  # Single token for all trades
 
 trade_history = []
+cumulative_profit = 0
+max_trades = 0  # Set by trader (0 = unlimited)
+trade_count = 0
 
 stake_amount = 0.35
-martingale_factor = 2.1
-
-cumulative_profit = 0
-MAX_STAKE = 30
 
 #-----------------------
 # INDICATORS
@@ -124,10 +120,12 @@ async def tick_stream():
                 analyze_signal()
 
 #-----------------------
-# TRADE EXECUTION
+# TRADE EXECUTION (60 seconds)
 #-----------------------
 
 async def execute_trade(direction, stake, token):
+    global trade_in_progress
+    
     url = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 
     async with websockets.connect(url) as ws:
@@ -141,12 +139,12 @@ async def execute_trade(direction, stake, token):
 
         proposal = {
             "proposal": 1,
-            "amount": round(stake,2),
+            "amount": round(stake, 2),
             "basis": "stake",
             "contract_type": contract_type,
             "currency": "USD",
-            "duration": 3,
-            "duration_unit": "t",
+            "duration": 60,          # Changed to 60 seconds
+            "duration_unit": "s",    # Changed from "t" (ticks) to "s" (seconds)
             "symbol": SYMBOL
         }
 
@@ -155,22 +153,27 @@ async def execute_trade(direction, stake, token):
         proposal_response = json.loads(await ws.recv())
 
         if "error" in proposal_response:
-            return "LOSS"
+            print(f"Proposal error: {proposal_response['error']['message']}")
+            trade_in_progress = False
+            return None, 0
 
         proposal_id = proposal_response["proposal"]["id"]
 
         await ws.send(json.dumps({
             "buy": proposal_id,
-            "price": round(stake,2)
+            "price": round(stake, 2)
         }))
 
         buy = json.loads(await ws.recv())
 
         if "error" in buy:
-            return "LOSS"
+            print(f"Buy error: {buy['error']['message']}")
+            trade_in_progress = False
+            return None, 0
 
         contract_id = buy["buy"]["contract_id"]
 
+        # Wait for contract to close (60 seconds + buffer)
         while True:
             await ws.send(json.dumps({
                 "proposal_open_contract": 1,
@@ -179,15 +182,23 @@ async def execute_trade(direction, stake, token):
 
             result = json.loads(await ws.recv())
 
+            if "error" in result:
+                print(f"Contract error: {result['error']['message']}")
+                trade_in_progress = False
+                return None, 0
+
             contract = result["proposal_open_contract"]
 
             if contract["is_sold"]:
-                profit = contract["profit"]
-
+                profit = float(contract["profit"])
+                exit_price = float(contract["exit_tick"]) if "exit_tick" in contract else price
+                
+                trade_in_progress = False
+                
                 if profit > 0:
-                    return "WIN"
+                    return "WIN", profit
                 else:
-                    return "LOSS"
+                    return "LOSS", profit
 
             await asyncio.sleep(1)
 
@@ -197,73 +208,59 @@ async def execute_trade(direction, stake, token):
 
 async def auto_trader():
     global auto_trader_running
+    global trade_in_progress
+    global trade_count
     global cumulative_profit
-    global demo_losses
-    global use_real_trade
-
-    martingale_stake = stake_amount
 
     while auto_trader_running:
-        if signal not in ["BUY","SELL"]:
+        # Check if max trades reached
+        if max_trades > 0 and trade_count >= max_trades:
+            print(f"Max trades ({max_trades}) reached. Stopping trader.")
+            auto_trader_running = False
+            break
+
+        # Wait for signal
+        if signal not in ["BUY", "SELL"]:
             await asyncio.sleep(1)
             continue
 
+        # Wait if trade in progress
+        if trade_in_progress:
+            await asyncio.sleep(1)
+            continue
+
+        # Start new trade
+        trade_in_progress = True
         direction = signal
+        
+        print(f"Placing {direction} trade at {price:.3f}")
 
-        # DEMO TRADING
-        if not use_real_trade:
-            result = await execute_trade(direction, stake_amount, demo_token)
+        result, profit = await execute_trade(direction, stake_amount, api_token)
 
-            trade_history.append({
-                "timestamp": time.strftime("%H:%M:%S"),
-                "account": "DEMO",
-                "direction": direction,
-                "stake": stake_amount,
-                "price": round(price,3),
-                "result": result
-            })
+        if result is None:
+            # Error occurred, already logged
+            await asyncio.sleep(2)
+            continue
 
-            if len(trade_history) > 20:
-                trade_history.pop(0)
+        trade_count += 1
+        cumulative_profit += profit
 
-            if result == "LOSS":
-                demo_losses += 1
-            else:
-                demo_losses = 0
+        trade_history.append({
+            "timestamp": time.strftime("%H:%M:%S"),
+            "direction": direction,
+            "stake": stake_amount,
+            "entry_price": round(price, 3),
+            "result": result,
+            "profit": round(profit, 2),
+            "trade_number": trade_count
+        })
 
-            if demo_losses >= 3:
-                use_real_trade = True
-                demo_losses = 0
+        if len(trade_history) > 50:
+            trade_history.pop(0)
 
-        # REAL TRADING
-        else:
-            result = await execute_trade(direction, martingale_stake, real_token)
+        print(f"Trade #{trade_count}: {result} | Profit: ${profit:.2f} | Total: ${cumulative_profit:.2f}")
 
-            trade_history.append({
-                "timestamp": time.strftime("%H:%M:%S"),
-                "account": "REAL",
-                "direction": direction,
-                "stake": martingale_stake,
-                "price": round(price,3),
-                "result": result
-            })
-
-            if len(trade_history) > 20:
-                trade_history.pop(0)
-
-            if result == "WIN":
-                cumulative_profit += martingale_stake
-                martingale_stake = stake_amount
-            else:
-                cumulative_profit -= martingale_stake
-
-                martingale_stake = min(
-                    round(martingale_stake * martingale_factor,2),
-                    MAX_STAKE
-                )
-
-            use_real_trade = False
-
+        # Wait before next trade to avoid over-trading
         await asyncio.sleep(5)
 
 #-----------------------
@@ -276,7 +273,11 @@ async def status():
         "price": price,
         "signal": signal,
         "trade_history": trade_history,
-        "cumulative_profit": cumulative_profit
+        "cumulative_profit": round(cumulative_profit, 2),
+        "trade_count": trade_count,
+        "max_trades": max_trades,
+        "auto_trader_running": auto_trader_running,
+        "trade_in_progress": trade_in_progress
     }
 
 #-----------------------
@@ -288,70 +289,117 @@ async def home():
     rows = ""
 
     for t in reversed(trade_history):
-        rows += f"<tr><td>{t['timestamp']}</td><td>{t['account']}</td><td>{t['direction']}</td><td>{t['stake']}</td><td>{t['price']}</td><td>{t['result']}</td></tr>"
+        color = "green" if t['result'] == "WIN" else "red"
+        rows += f"<tr style='color:{color}'><td>{t['trade_number']}</td><td>{t['timestamp']}</td><td>{t['direction']}</td><td>${t['stake']}</td><td>{t['entry_price']}</td><td>{t['result']}</td><td>${t['profit']}</td></tr>"
+
+    status_color = "green" if auto_trader_running else "red"
+    status_text = "RUNNING" if auto_trader_running else "STOPPED"
 
     return f"""
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-body{{background:black;color:white;text-align:center;font-family:Arial}}
-.circle{{width:260px;height:260px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;margin:auto;margin-top:40px;font-size:28px}}
-.buy{{background:green}}
-.sell{{background:red}}
-.neutral{{background:gray}}
-table{{width:95%;margin:auto;border-collapse:collapse;margin-top:20px}}
-td,th{{border:1px solid white;padding:5px}}
-input{{padding:6px;margin:5px}}
-button{{padding:10px;margin:6px;font-size:16px}}
+body{{background:#0a0a0a;color:#fff;text-align:center;font-family:'Segoe UI',Arial,sans-serif;margin:0;padding:20px}}
+.circle{{width:200px;height:200px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;margin:20px auto;font-size:24px;font-weight:bold;box-shadow:0 0 30px rgba(0,255,0,0.3)}}
+.buy{{background:linear-gradient(135deg,#00b894,#00cec9);box-shadow:0 0 30px rgba(0,184,148,0.6)}}
+.sell{{background:linear-gradient(135deg,#d63031,#e17055);box-shadow:0 0 30px rgba(214,48,49,0.6)}}
+.neutral{{background:linear-gradient(135deg,#636e72,#b2bec3)}}
+table{{width:100%;max-width:800px;margin:20px auto;border-collapse:collapse;background:#1a1a1a;border-radius:10px;overflow:hidden}}
+td,th{{border:1px solid #333;padding:12px;text-align:center}}
+th{{background:#2d3436;color:#74b9ff;font-weight:600}}
+tr:hover{{background:#2d3436}}
+input{{padding:10px;margin:5px;border-radius:5px;border:1px solid #333;background:#1a1a1a;color:#fff;width:200px}}
+button{{padding:12px 24px;margin:10px;font-size:16px;border:none;border-radius:5px;cursor:pointer;transition:all 0.3s}}
+.start-btn{{background:#00b894;color:white}}
+.start-btn:hover{{background:#00a885;transform:scale(1.05)}}
+.stop-btn{{background:#d63031;color:white}}
+.stop-btn:hover{{background:#c0392b;transform:scale(1.05)}}
+.status{{display:inline-block;padding:8px 16px;border-radius:20px;font-weight:bold;background:{status_color};color:white;margin:10px}}
+.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px;max-width:600px;margin:20px auto}}
+.stat-box{{background:#1a1a1a;padding:15px;border-radius:10px;border:1px solid #333}}
+.stat-label{{color:#74b9ff;font-size:12px;text-transform:uppercase}}
+.stat-value{{font-size:24px;font-weight:bold;margin-top:5px}}
 </style>
 </head>
 <body>
-<div class="circle {signal.lower()}" id="circle">{price:.3f}<br>{signal}</div>
-<h3>Auto Trader Controls</h3>
+<h1>🚀 Deriv Trading Bot</h1>
+<div class="status">{status_text}</div>
+
+<div class="circle {signal.lower()}" id="circle">
+    <div>${{price:.3f}}</div>
+    <div style="font-size:16px;margin-top:10px">{signal}</div>
+</div>
+
+<div class="stats">
+    <div class="stat-box">
+        <div class="stat-label">Trade Count</div>
+        <div class="stat-value" id="trade_count">{trade_count}</div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Total Profit</div>
+        <div class="stat-value" id="profit" style="color:{'#00b894' if cumulative_profit >= 0 else '#d63031'}">${{round(cumulative_profit,2)}}</div>
+    </div>
+    <div class="stat-box">
+        <div class="stat-label">Max Trades</div>
+        <div class="stat-value" id="max_trades">{max_trades if max_trades > 0 else '∞'}</div>
+    </div>
+</div>
+
+<h3>Trading Controls</h3>
 <form id="startForm">
-Demo Token:<br>
-<input name="demo" type="password"><br>
-Real Token:<br>
-<input name="real" type="password"><br>
-Stake:<br>
-<input name="stake" value="{stake_amount}" step="0.01"><br>
-<button type="submit">Start Auto-Trader</button>
+    <input name="token" type="password" placeholder="API Token" required><br>
+    <input name="stake" type="number" step="0.01" value="{stake_amount}" placeholder="Stake Amount"><br>
+    <input name="max_trades" type="number" min="0" value="0" placeholder="Max Trades (0=unlimited)"><br>
+    <button type="submit" class="start-btn">▶ Start Trading</button>
 </form>
-<button onclick="stopBot()">Stop Auto-Trader</button>
+
+<button class="stop-btn" onclick="stopBot()">⏹ Stop Trading</button>
+
 <h3>Trade History</h3>
 <table id="table">
 <tr>
-<th>Time</th>
-<th>Account</th>
-<th>Dir</th>
-<th>Stake</th>
-<th>Price</th>
-<th>Result</th>
+    <th>#</th>
+    <th>Time</th>
+    <th>Dir</th>
+    <th>Stake</th>
+    <th>Price</th>
+    <th>Result</th>
+    <th>P/L</th>
 </tr>{rows}
 </table>
-<p>Cumulative Profit: <span id="profit">{round(cumulative_profit,2)}</span></p>
+
 <script>
 document.getElementById("startForm").onsubmit = async (e)=>{{
-e.preventDefault()
-const f = new FormData(e.target)
-await fetch("/start",{{method:"POST",body:f}})
+    e.preventDefault()
+    const f = new FormData(e.target)
+    await fetch("/start",{{method:"POST",body:f}})
+    alert("Trading started!")
 }}
+
 async function stopBot(){{
-await fetch("/stop",{{method:"POST"}})
+    await fetch("/stop",{{method:"POST"}})
+    alert("Trading stopped!")
 }}
+
 async function update(){{
-const r = await fetch("/status")
-const d = await r.json()
-document.getElementById("circle").innerHTML = d.price.toFixed(3)+"<br>"+d.signal
-document.getElementById("circle").className = "circle "+d.signal.toLowerCase()
-let rows = "<tr><th>Time</th><th>Account</th><th>Dir</th><th>Stake</th><th>Price</th><th>Result</th></tr>"
-for(let t of d.trade_history.slice().reverse()){{
-rows += `<tr><td>${{t.timestamp}}</td><td>${{t.account}}</td><td>${{t.direction}}</td><td>${{t.stake}}</td><td>${{t.price}}</td><td>${{t.result}}</td></tr>`
+    const r = await fetch("/status")
+    const d = await r.json()
+    
+    document.getElementById("circle").innerHTML = `<div>${{d.price.toFixed(3)}}</div><div style="font-size:16px;margin-top:10px">${{d.signal}}</div>`
+    document.getElementById("circle").className = "circle " + d.signal.toLowerCase()
+    document.getElementById("trade_count").innerText = d.trade_count
+    document.getElementById("profit").innerText = "$" + d.cumulative_profit.toFixed(2)
+    document.getElementById("profit").style.color = d.cumulative_profit >= 0 ? '#00b894' : '#d63031'
+    
+    let rows = "<tr><th>#</th><th>Time</th><th>Dir</th><th>Stake</th><th>Price</th><th>Result</th><th>P/L</th></tr>"
+    for(let t of d.trade_history.slice().reverse()){{
+        const color = t.result === "WIN" ? "green" : "red"
+        rows += `<tr style="color:${{color}}"><td>${{t.trade_number}}</td><td>${{t.timestamp}}</td><td>${{t.direction}}</td><td>$${{t.stake}}</td><td>${{t.entry_price}}</td><td>${{t.result}}</td><td>$${{t.profit}}</td></tr>`
+    }}
+    document.getElementById("table").innerHTML = rows
 }}
-document.getElementById("table").innerHTML = rows
-document.getElementById("profit").innerText = d.cumulative_profit.toFixed(2)
-}}
+
 setInterval(update,2000)
 </script>
 </body>
@@ -363,23 +411,30 @@ setInterval(update,2000)
 #-----------------------
 
 @app.post("/start")
-async def start(demo: str = Form(...), real: str = Form(...), stake: float = Form(...)):
+async def start(token: str = Form(...), stake: float = Form(...), max_trades: int = Form(0)):
     global auto_trader_running
-    global demo_token
-    global real_token
+    global api_token
     global stake_amount
     global cumulative_profit
+    global trade_count
+    global trade_in_progress
+    global max_trades
 
-    demo_token = demo
-    real_token = real
-    stake_amount = round(stake,2)
-    cumulative_profit = 0
-
+    api_token = token
+    stake_amount = round(stake, 2)
+    max_trades = max(0, max_trades)  # Ensure non-negative
+    
+    # Reset stats only if starting fresh (not resuming)
     if not auto_trader_running:
+        cumulative_profit = 0
+        trade_count = 0
+        trade_in_progress = False
+        trade_history.clear()
+        
         auto_trader_running = True
         asyncio.create_task(auto_trader())
 
-    return {"status":"started"}
+    return {"status": "started", "max_trades": max_trades if max_trades > 0 else "unlimited"}
 
 #-----------------------
 # STOP
@@ -389,7 +444,7 @@ async def start(demo: str = Form(...), real: str = Form(...), stake: float = For
 async def stop():
     global auto_trader_running
     auto_trader_running = False
-    return {"status":"stopped"}
+    return {"status": "stopped", "final_profit": round(cumulative_profit, 2), "total_trades": trade_count}
 
 #-----------------------
 # STARTUP
